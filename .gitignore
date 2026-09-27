@@ -202,3 +202,12 @@ cython_debug/
 checkpoint/
 
 # End of https://www.toptal.com/developers/gitignore/api/jupyternotebooks,visualstudiocode,python
+
+# Cosmic Rays local/runtime state
+.env
+*.local
+spark-warehouse/
+metastore_db/
+derby.log
+checkpoints/
+.DS_Store

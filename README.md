@@ -1,93 +1,205 @@
-# Streaming Processing of Cosmic Rays using Drift Tubes Detectors
-## Introduction
-This project focuses on real-time processing of data collected from a particle physics detector, specifically using Drift Tubes (DT) detectors. The goal is to develop a streaming application that monitors the quality of the detector in real-time and presents the results in a live monitoring dashboard.
+# Cosmic Rays · Live Detector Monitor
 
+A small distributed streaming application for **real-time quality monitoring of mini Drift Tube (miniDT) cosmic-ray detectors**.
 
-## Theoretical description
-A set of muon detectors, known as mini Drift Tubes (miniDTs), has been constructed and installed in Legnaro INFN Laboratories, located approximately 10 km from Padova. These detectors are designed to capture signals emitted by cosmic rays. The miniDTs operate based on the principle of ionization: when charged particles pass through the detector's volume, they ionize the gas mixture inside, creating electron-ion pairs. Electric fields shaped in a specific manner enable the electron cloud to drift at a nearly constant velocity ($v_{drift} = 53.8$ µm/ns). Near the sensing anode wire, the intense electric field triggers further ionization and avalanche, amplifying the signal.
+The project streams detector data from Cloud Veneto object storage into **Apache Kafka**, processes each micro-batch with **Spark Structured Streaming**, publishes compact monitoring summaries back to Kafka, and visualises them in a live dashboard.
 
-The signals are collected on the anodic wire, amplified, digitized, discriminated, and processed through a Data Acquisition (DAQ) system. Within the DAQ system, a set of Field-Programmable Gate Arrays (FPGAs) perform Time-to-Digital Conversion (TDC), associating a digital signal with the time of collection for each electron cloud reaching the wire. These digitized signals are commonly referred to as "hits."
+![Streaming architecture](assets/Schema1.png)
 
-![scheme1](Figures/pic1.png)
+## Architecture
 
-By knowing the passage time of the muon (referred to as t0), the TDC of a hit can be translated into a position within the cell using the constant drift velocity (vdrift). The position ($x_{hit}$) is calculated as follows:
-$$x_{hit} = (t_{hit} − t_0) \times v_{drift}.$$
+```text
+Cloud Veneto / S3
+       │
+       ▼
+  cosmic-producer
+       │
+       ▼
+ Kafka · topic_stream
+       │
+       ▼
+ Spark Structured Streaming
+       │
+       ▼
+ Kafka · topic_results
+       │
+       ▼
+  cosmic-dashboard
+```
 
-However, the time of passage for the muon is not generally known in advance and must be extracted from external information or geometric considerations.
+The refactored application preserves the original Kafka topics, message schema, detector mapping, Spark master defaults, micro-batch processing, and histogram definitions. The original notebooks are retained under [`notebooks/legacy`](notebooks/legacy) as a reference implementation.
 
-Additionally, there is an inherent left-right ambiguity associated with the time-to-space conversion. The time information from a single hit is insufficient to determine whether the muon passed through the right or left half of the cell. To resolve this ambiguity and identify the track trajectory across one or more DT chambers, a complete reconstruction of a track spanning multiple cells is required.
+## What is monitored
 
-The geometry of a single miniDT chamber consists of 64 cells organized into four layers, with 16 cells in each layer. Adjacent layers are staggered by half of a cell width. Each cell has a transversal dimension of 42 × 13 mm² (width × height). The following figure illustrates the schema for a single DT chamber:
+For each Spark micro-batch the application computes:
 
-![scheme2](Figures/pic2.png)
+- total number of detector hits after cleansing;
+- hits per chamber;
+- active TDC-channel histograms per chamber;
+- distribution of active TDC channels per orbit;
+- active-channel histograms for orbits containing a scintillator signal;
+- processing time for the batch.
 
-Four DT chambers are stacked in a "muon-telescope" configuration, where chambers 0, 2, and 3 have the same orientation, while chamber 1 is rotated 90 degrees to measure in the orthogonal view. Two external detectors, represented by plastic scintillator palettes (shown in blue in the figure), provide external timing information for the particle passage, including the t0 information.
+The detector-side cleansing and chamber mapping are unchanged from the notebook implementation.
 
-![scheme3](Figures/pic3.png)
+## Repository layout
 
+```text
+.
+├── assets/                 # Architecture and detector figures
+├── notebooks/legacy/       # Original notebook workflow, kept as fallback
+├── scripts/                # Spark/Kafka cluster helpers
+├── src/cosmic_rays/
+│   ├── config.py           # Environment-driven configuration
+│   ├── producer.py         # S3 -> Kafka
+│   ├── processing.py       # Kafka -> Spark -> Kafka
+│   ├── dashboard.py        # Standalone live Matplotlib dashboard
+│   └── messages.py         # Shared result-message utilities
+├── tests/                  # Small contract/state tests
+├── .env.example
+├── Makefile
+└── pyproject.toml
+```
 
-## Task
-The main tasks of this project include:
+## Setup
 
-Collecting data from the detector's Data Acquisition System (DAQ) and streaming it to a Kafka topic using a stream-emulator script.
+The original deployment assumes:
 
-Processing the collected hits using a distributed framework such as Dask or PySpark.
+- Kafka broker: `pd-slave3:9092`
+- Spark master: `spark://pd-master:7077`
+- Spark installation: `/usr/local/spark`
+- Spark Kafka connector: `3.1.2` / Scala `2.12`
 
-Re-injecting the processed results into a new Kafka topic hosted on the same brokers.
+Those values remain the defaults, but are now configurable.
 
-Developing a consumer script (preferably in Python) that retrieves the processed data from the Kafka topic and generates live updates and visualizations of the evaluated quantities. Bokeh or Matplotlib's pyplot can be used to create simple "dashboards" for this purpose.
+Create a local environment file:
 
-The overall architecture of the project can be summarized as follows:
-![Scheme](Figures/Schema1.png)
+```bash
+cp .env.example .env
+```
 
-Data Structure
-The dataset is provided in multiple text files stored as comma-separated values (CSV) in a cloud storage S3 bucket hosted on Cloud Veneto. The dataset can be accessed using the following link: [mapd-minidt-stream](https://cloud-areapd.pd.infn.it:5210/swift/v1/AUTH_d2e941ce4b324467b6b3d467a923a9bc/mapd-minidt-stream/). Detailed instructions on managing the storage and accessing the dataset can be found [here](https://userguide.cloudveneto.it/en/latest/ManagingStorage.html#object-storage-experimental).
+If the object-storage bucket requires authentication, add the credentials to `.env`:
 
-An example of the data format is as follows:
+```dotenv
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
+```
 
-| HEAD | FPGA | TDC_CHANNEL |  ORBIT_CNT | BX_COUNTER | TDC_MEAS |
-|:----:|:----:|:-----------:|:----------:|:----------:|:--------:|
-|   1  |   1  |      0      | 3387315431 |      0     |    130   |
-|   0  |   1  |      2      | 3387315431 |    1119    |    24    |
-|   4  |   1  |      0      | 3387315431 |      0     | -0.57373 |
-|   5  |   1  |      0      | 3387315431 |      0     |   45.5   |
-|   2  |   0  |      75     | 3387200947 |    2922    |     2    |
-|   2  |   0  |     105     | 3387200955 |    2227    |    29    |
-|  ... |  ... |     ...     |     ...    |     ...    |    ...   |
+> `.env` is ignored by Git. Credentials are intentionally no longer embedded in source code or notebooks.
 
-## Dataset Processing
-The dataset processing can be performed using either Spark or Dask. It is recommended to work with data batches of a few seconds in duration (1 to 5 seconds).
+Install the Python package:
 
-The processing workflow involves the following steps:
+```bash
+python -m pip install -e '.[spark]'
+```
 
-  - Perform data cleansing by removing entries with HEAD != 2, as they contain ancillary information not relevant to the project.
-  - Map the data-format to the corresponding detectors based on the FPGA and TDC_CHANNEL values.
-  - Compute the following information for each data batch:
-  - Total number of processed hits after data cleansing (1 value per batch).
-  - Total number of processed hits after data cleansing, per chamber (4 values per batch).
-  - Histogram of the counts of active TDC_CHANNEL values per chamber (4 arrays per batch).
-  - Histogram of the total number of active TDC_CHANNEL values in each ORBIT_CNT per chamber (4 arrays per batch).
-  - Wrap the processed information into one message per batch and inject it into a new Kafka topic.
+If PySpark/findspark are already provided by the cluster image, installing the base package is sufficient:
 
-## Live Plotting
-The results of the processing should be presented in the form of a continuously updating dashboard. A Python script (or another language) should consume data from the Kafka topic and generate plots and histograms of the quantities mentioned above.
+```bash
+python -m pip install -e .
+```
 
-You can use Python modules such as Bokeh or Matplotlib's pyplot (free version) to create a continuously updating webpage for visualizing the plots. However, feel free to explore and utilize any other suitable solutions for this task.
+## Run
 
-## Extras
-In addition to the main project goals, there are opportunities to earn bonus points by extending the distributed processing studies to include additional features.
+### 1. Start the existing Spark/Kafka services
 
-External timing information from plastic scintillator palettes in the telescope can be used to select only hits compatible with a scintillator signal. This enables the observation of interesting features in the data, such as performing a "muon-radiography" by displaying the number of active channels compatible with the passage of muons.
+```bash
+make start
+```
 
-Furthermore, the detector properties impose an upper boundary on the hit collection time, where the electron cloud produced by a muon cannot travel further than half of a cell before being collected on the sensing wire. By plotting the difference between the hit collection times and the time of passage of the corresponding muons, a box-shaped profile with sharp rising and falling edges is expected.
+The helper uses the same infrastructure assumptions as the original project. `SPARK_HOME` and `KAFKA_HOST` can be overridden through the environment.
 
-To define these quantities, the hit time information should be translated into an absolute timing feature. The TDC time information provided for each signal consists of three counters that mimic the clock distribution of the LHC collider. By converting the counters, an absolute time (in nanoseconds) can be associated with each hit.
+### 2. Start the producer
 
-The passage time of any muon (t0) is provided by the external scintillator signal encoded in the TDC hits. However, due to signal transmission delay, the t0 signal is delayed by approximately 95 ns compared to the hits collected in the chambers. Therefore, it is necessary to correct the t0 time when comparing it with the hit's absolute time (tTDC hit).
+On a clean run, recreate the two topics to reproduce the original notebook behaviour:
 
-During the processing phase, ABSOLUTETIME information should be associated with all hits by converting the counters to the proper time information in nanoseconds. Only hits with a scintillator signal within the same orbit can have a DRIFTIME defined as the difference between the ABSOLUTETIME of each hit and the scintillator's ABSOLUTETIME within the same orbit.
+```bash
+cosmic-producer --reset-topics
+```
 
-Two additional types of results can be added to the processing and displayed in the live visualization:
+For subsequent runs, keep existing topics:
 
-  1. Histogram of the counts of active TDC_CHANNEL values per chamber, only for orbits with at least one scintillator signal (4 arrays per batch).
-  2. Histogram of the DRIFTIME per chamber (4 arrays per batch).
+```bash
+cosmic-producer
+```
+
+### 3. Start Spark processing
+
+```bash
+cosmic-processor
+```
+
+### 4. Open the dashboard
+
+Single-batch view:
+
+```bash
+cosmic-dashboard --mode single
+```
+
+Cumulative view:
+
+```bash
+cosmic-dashboard --mode cumulative
+```
+
+Equivalent `make` targets are available:
+
+```bash
+make producer
+make processor
+make dashboard
+```
+
+## Configuration
+
+All environment-specific values are centralized in `.env`. See [`.env.example`](.env.example) for the full list.
+
+The most relevant settings are:
+
+| Variable | Default |
+|---|---|
+| `KAFKA_BOOTSTRAP_SERVERS` | `pd-slave3:9092` |
+| `KAFKA_STREAM_TOPIC` | `topic_stream` |
+| `KAFKA_RESULTS_TOPIC` | `topic_results` |
+| `SPARK_MASTER` | `spark://pd-master:7077` |
+| `SPARK_TRIGGER_INTERVAL` | `5 seconds` |
+| `S3_BUCKET` | `mapd-minidt-stream` |
+| `PRODUCER_WAIT_SECONDS` | `0.00018` |
+
+## Detector data
+
+Each input row follows the original DAQ format:
+
+| HEAD | FPGA | TDC_CHANNEL | ORBIT_CNT | BX_COUNTER | TDC_MEAS |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 0 | 3387315431 | 0 | 130 |
+| 0 | 1 | 2 | 3387315431 | 1119 | 24 |
+| 2 | 0 | 75 | 3387200947 | 2922 | 2 |
+
+Only rows with `HEAD == 2` are used for detector monitoring. FPGA/channel pairs are then mapped to four chambers plus the scintillator signal exactly as in the original implementation.
+
+![miniDT chamber](assets/pic2.png)
+
+## Tests
+
+The tests intentionally focus on the parts that can be checked without a running Kafka/Spark cluster: the result-message contract, cumulative histogram state, and the default deployment contract.
+
+```bash
+python -m pip install -e '.[dev]'
+pytest -q
+```
+
+An end-to-end run still requires the original cluster infrastructure and data endpoint.
+
+## Legacy notebooks
+
+The original three-notebook workflow is available in [`notebooks/legacy`](notebooks/legacy). Outputs were cleared to keep the Git repository compact. They are useful for comparing the refactored modules against the original implementation, but the Python entry points are now the recommended interface.
+
+## Detector background
+
+The miniDT telescope consists of four drift-tube chambers. Cosmic muons ionise the gas inside each cell; the electron cloud drifts toward the sensing wire and the DAQ records the corresponding timing information. Three chambers share one orientation while one is rotated by 90° to measure the orthogonal view. External scintillators provide timing information used for coincidence measurements.
+
+![miniDT telescope](assets/pic3.png)
+
+The original project description and figures are preserved, while the executable pipeline is now separated from presentation and exploratory notebook state.
